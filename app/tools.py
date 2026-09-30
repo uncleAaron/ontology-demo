@@ -39,7 +39,7 @@ def invoke(path,task,name,args):
         from .engine import execute,coding_fixture
         if name=='inspect_code_example':return coding_fixture()
         r,e=execute(dict(task,kind='complaint'))
-        return {'mode':'simulated-business-data','rule_decision':r['decision'],'title':r['title'],'rule_version':r['rule_version'],'evidence':e}
+        return {'mode':'simulated-business-data','rule_decision':r['decision'],'title':r['title'],'rule_version':r['rule_version'],'evidence':e,'knowledge_refs':[{'document_id':'kb-release','revision':1}]}
     if name=='get_relations':return graph(path,args['object_id'],args['depth'],limit=30)
     with connect(path) as c:
         if name=='get_object':
@@ -47,10 +47,10 @@ def invoke(path,task,name,args):
             if not r:raise ValueError('对象不存在或不可访问')
             return object_dict(r)
         if name=='search_documents':
-            rows=c.execute('SELECT id,title,version,substr(body,1,1200) body,length(body)>1200 truncated FROM documents WHERE project=? AND (instr(title,?)>0 OR instr(body,?)>0) LIMIT 6',(PROJECT,args['query'],args['query'])).fetchall()
-            return {'documents':[dict(r) for r in rows[:5]],'truncated':len(rows)>5}
+            rows=c.execute('SELECT d.id,title,version,substr(body,1,1200) body,length(body)>1200 truncated,h.published_revision revision FROM documents d JOIN document_heads h ON h.document_id=d.id WHERE h.status="active" AND project=? AND (instr(title,?)>0 OR instr(body,?)>0) LIMIT 6',(PROJECT,args['query'],args['query'])).fetchall()
+            return {'documents':[dict(r) for r in rows[:5]],'truncated':len(rows)>5,'knowledge_refs':[{'document_id':r['id'],'revision':r['revision']} for r in rows[:5]]}
         if name=='read_document':
-            r=c.execute('SELECT id,title,version,substr(body,1,6000) body,length(body)>6000 truncated FROM documents WHERE id=? AND project=?',(args['document_id'],PROJECT)).fetchone()
+            r=c.execute('SELECT d.id,title,version,substr(body,1,6000) body,length(body)>6000 truncated,h.published_revision revision FROM documents d JOIN document_heads h ON h.document_id=d.id WHERE h.status="active" AND d.id=? AND project=?',(args['document_id'],PROJECT)).fetchone()
             if not r:raise ValueError('文档不存在或不可访问')
-            return dict(r)
+            return dict(r)|{'knowledge_refs':[{'document_id':r['id'],'revision':r['revision']}]}
     raise ValueError('此工具不能在此处执行')

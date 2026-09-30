@@ -33,7 +33,9 @@ def init(path):
             if column not in {r['name'] for r in c.execute('PRAGMA table_info('+table+')')}:
                 c.execute('ALTER TABLE '+table+' ADD COLUMN '+column+' '+definition)
         c.execute("INSERT OR REPLACE INTO meta VALUES('schema_version','2')")
-        if c.execute("SELECT 1 FROM meta WHERE key='seed'").fetchone(): return
+        if c.execute("SELECT 1 FROM meta WHERE key='seed'").fetchone():
+            from .knowledge import migrate
+            migrate(c);return
         types=[('ticket','客诉',['编号','描述']),('feature','功能',['名称','负责人']),('service','服务',['名称','仓库']),('version','版本',['版本号']),('commit','提交',['提交号','仓库']),('defect','缺陷',['问题范围']),('deployment','部署',['环境','状态']),('test','验证',['结果','环境']),('requirement','需求',['目标','验收条件']),('repo','仓库',['名称'])]
         c.executemany('INSERT INTO types VALUES(?,?,?)',[(a,b,json.dumps(v,ensure_ascii=False)) for a,b,v in types])
         rels=[('concerns','涉及','ticket','feature'),('implemented_by','由服务实现','feature','service'),('has_version','拥有版本','service','version'),('contains','包含','version','commit'),('fixes','修复','commit','defect'),('uses','使用版本','deployment','version'),('verifies','验证','test','deployment'),('requires','要求','requirement','feature'),('in_repo','对应仓库','service','repo'),('reported','报告','ticket','defect')]
@@ -50,3 +52,5 @@ def init(path):
             assert list(expected)==actual
             c.execute('INSERT INTO relations VALUES(?,?,?,?,?,?,?,?,?)',(i,a,b,t,status,'2026-09-01T00:00:00Z',end,origin,doc))
         c.execute("INSERT INTO meta VALUES('seed','1')")
+        from .knowledge import migrate
+        migrate(c)

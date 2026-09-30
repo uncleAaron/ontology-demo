@@ -21,6 +21,10 @@ def run_agent(path,task,client=None,heartbeat=lambda:None,record=lambda *args:No
     for round_index in range(settings.max_rounds):
         if time.monotonic()-start>180:break
         heartbeat()
+        from .knowledge import valid_refs,block_result
+        with connect(path) as c:
+            warnings=valid_refs(c,[ref for e in evidence for ref in e['payload'].get('knowledge_refs',[])])
+        if warnings:return block_result({'mode':'model-assisted-simulation','scope':'支付示例'},warnings),evidence
         try:message=client.complete(messages,schemas(task['kind']))
         except ModelError as e:
             record('model_request',{'round':round_index+1},'error',{'message':str(e)})
@@ -45,7 +49,8 @@ def run_agent(path,task,client=None,heartbeat=lambda:None,record=lambda *args:No
                     decision=runtime['rule_decision'] if runtime and is_analysis else ('insufficient' if is_analysis else 'draft')
                     result={'title':runtime['title'] if runtime and is_analysis else '模型分析草稿已生成','decision':decision,'rule_version':'fix-confirmation@1','scope':'支付示例 / 模拟业务来源','mode':'model-assisted-simulation','model':settings.model,'external_actions':False,'citations':valid['citations'],'next_action':'人工核对模型草稿及引用内容','artifacts':[{'title':'模型草稿（未审核）','text':valid['summary']},{'title':'未知项与下一步','text':'未知项：\n'+'\n'.join(valid['unknowns'])+'\n下一步：\n'+'\n'.join(valid['next_steps'])}],'notice':'引用ID已校验存在；这不等于模型每句话已被来源支持。规则结论由程序计算，模型不能修改。'}
                     if coding:result['coding']=coding
-                    return result,evidence
+                    with connect(path) as c:warnings=valid_refs(c,[ref for e in evidence for ref in e['payload'].get('knowledge_refs',[])])
+                    return block_result(result,warnings),evidence
                 output=invoke(path,task,name,valid)
                 eid=f"{task['id']}-a{task.get('attempts',1)}-e{len(evidence)+1}"
                 item={'id':eid,'label':name,'payload':output,'origin':'只读工具 / '+name,'classification':'observation'}

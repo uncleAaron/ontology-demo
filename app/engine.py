@@ -67,6 +67,8 @@ def process_one(path,model_client=None):
             c.execute('UPDATE tasks SET lease_until=? WHERE id=?',(time.time()+60,task['id']))
     def save_evidence(c,e,idx):
         c.execute('INSERT OR IGNORE INTO evidence(id,task_id,label,payload,origin,observed_at,classification,attempt) VALUES(?,?,?,?,?,?,?,?)',(e.get('id',f"{task['id']}-a{task['attempts']}-e{idx}"),task['id'],e['label'],json.dumps(e['payload'],ensure_ascii=False),e['origin'],now(),e['classification'],task['attempts']))
+        for ref in e['payload'].get('knowledge_refs',[]):
+            c.execute('INSERT OR IGNORE INTO task_knowledge_refs VALUES(?,?,?,?,?)',(task['id'],task['attempts'],e.get('id',f"{task['id']}-a{task['attempts']}-e{idx}"),ref['document_id'],ref['revision']))
     def record(name,args,status,result,evidence=None):
         with connect(path) as c:
             c.execute('BEGIN IMMEDIATE');own(c)
@@ -79,9 +81,13 @@ def process_one(path,model_client=None):
             result,evidence=run_agent(path,task,client=model_client,heartbeat=heartbeat,record=record)
         else:
             result,evidence=execute(task)
+            # Fixed templates use only their original seed baseline, never endorse a new source revision.
+            evidence[0]['payload']['knowledge_refs']=[{'document_id':d,'revision':1} for d in ['kb-runbook','kb-release','kb-accept']]
         with connect(path) as c:
             c.execute('BEGIN IMMEDIATE');own(c)
             for idx,e in enumerate(evidence):save_evidence(c,e,idx)
+            from .knowledge import task_warnings,block_result
+            result=block_result(result,task_warnings(c,task['id'],task['attempts']))
             if task['mode']=='demo':
                 steps=[('确定任务范围','支付演示项目；仅使用预置对象与可信样例'),('获取上下文','排障手册、需求验收标准和已确认对象关联'),('核实证据','模拟连接器返回部署与验证记录；对比来源和时效'),('交付结果','记录确定性判断、未验证范围与交付物；未执行外部动作')]
                 for label,detail in steps:c.execute('INSERT INTO steps(task_id,label,detail,created_at,attempt) VALUES(?,?,?,?,?)',(task['id'],label,detail,now(),task['attempts']))

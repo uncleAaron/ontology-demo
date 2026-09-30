@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Literal
 from fastapi import FastAPI,HTTPException,Query
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel,Field
+from pydantic import BaseModel,Field,ConfigDict
 from .db import init,connect
 from .graph import graph,find_path,object_dict,PROJECT
 from .engine import create_task,process_one
@@ -28,7 +28,7 @@ async def lifespan(app):
     yield
     stop.set();thread.join(timeout=15)
 
-app=FastAPI(title='Ontology Workbench API',version='0.2.0',lifespan=lifespan)
+app=FastAPI(title='Ontology Workbench API',version='0.3.0',lifespan=lifespan)
 class TaskInput(BaseModel):
     mode:Literal['demo','model']='demo'
     kind:Literal['complaint','operations','requirements','coding']
@@ -42,8 +42,8 @@ def health():
     except ModelError:configured=False
     return {'status':'ok','mode':'demo-and-optional-model','database':'sqlite','model_connected':False,'model_configured':configured,'business_connectors':'simulated'}
 @app.get('/api/documents')
-def documents(q:str=Query('',max_length=100)):
-    with connect(DB) as c:return [dict(r) for r in c.execute('SELECT * FROM documents WHERE project=? AND (instr(title,?)>0 OR instr(body,?)>0) ORDER BY id',(PROJECT,q,q))]
+def documents(q:str=Query('',max_length=100),include_inactive:bool=False):
+    with connect(DB) as c:return [dict(r) for r in c.execute('SELECT d.id,d.project,r.title,r.body,r.version,h.status,h.revision,h.published_revision,h.generation FROM documents d JOIN document_heads h ON h.document_id=d.id JOIN document_revisions r ON r.document_id=d.id AND r.revision=h.revision WHERE d.project=? AND (? OR h.status="active") AND (instr(r.title,?)>0 OR instr(r.body,?)>0) ORDER BY d.id',(PROJECT,include_inactive,q,q))]
 @app.get('/api/ontology')
 def ontology():
     with connect(DB) as c:
@@ -76,6 +76,9 @@ def task_get(task_id:str):
         if not r:raise HTTPException(404,'任务不存在')
         t=dict(r);t['result']=json.loads(t['result']) if t['result'] else None
         t['evidence']=[dict(e)|{'payload':json.loads(e['payload'])} for e in c.execute('SELECT * FROM evidence WHERE task_id=? AND attempt=?',(task_id,t['attempts']))]
+        from .knowledge import task_warnings
+        t['knowledge_warnings']=task_warnings(c,task_id,t['attempts'])
+        t['knowledge_tracking']='tracked' if c.execute('SELECT 1 FROM task_knowledge_refs WHERE task_id=? AND attempt=?',(task_id,t['attempts'])).fetchone() else 'no-document-dependencies-recorded'
         t['steps']=[dict(e) for e in c.execute('SELECT * FROM steps WHERE task_id=? AND attempt=? ORDER BY id',(task_id,t['attempts']))]
         t['tool_calls']=[dict(x)|{'arguments':json.loads(x['arguments']),'result':json.loads(x['result'])} for x in c.execute('SELECT * FROM tool_calls WHERE task_id=? AND attempt=? ORDER BY id',(task_id,t['attempts']))]
         return t
@@ -89,6 +92,8 @@ def document_create(body:DocumentInput):
     doc_id='doc-'+uuid.uuid4().hex[:12]
     with connect(DB) as c:
         c.execute('INSERT INTO documents VALUES(?,?,?,?,?)',(doc_id,body.title,body.version,body.body,PROJECT))
+        from .knowledge import register_document
+        register_document(c,doc_id)
     return {'id':doc_id,'project':PROJECT,'status':'demo-imported'}
 
 class RelationInput(BaseModel):
@@ -101,14 +106,20 @@ class RelationInput(BaseModel):
 @app.post('/api/relations/suggestions',status_code=201)
 def suggest_relation(body:RelationInput):
     with connect(DB) as c:
+        c.execute('BEGIN IMMEDIATE')
         a=c.execute('SELECT * FROM objects WHERE id=? AND project=?',(body.source,PROJECT)).fetchone()
         b=c.execute('SELECT * FROM objects WHERE id=? AND project=?',(body.target,PROJECT)).fetchone()
         t=c.execute('SELECT * FROM relation_types WHERE id=?',(body.type,)).fetchone()
         if not a or not b:raise HTTPException(404,'对象不存在或不可访问')
         if not t or (a['type'],b['type'])!=(t['source_type'],t['target_type']):raise HTTPException(422,'关系不符合本体类型约束')
-        if body.document_id and not c.execute('SELECT 1 FROM documents WHERE id=? AND project=?',(body.document_id,PROJECT)).fetchone():raise HTTPException(404,'来源不存在或不可访问')
+        if body.document_id:
+            from .knowledge import head
+            try:h=head(c,body.document_id)
+            except KeyError:raise HTTPException(404,'来源不存在或不可访问')
+            if h['status']!='active':raise HTTPException(409,'来源尚未生效或已撤回')
         relation_id='rel-'+uuid.uuid4().hex[:12]
         c.execute('INSERT INTO relations VALUES(?,?,?,?,?,?,?,?,?)',(relation_id,body.source,body.target,body.type,'candidate','2026-09-30T00:00:00Z',None,body.origin,body.document_id))
+        if body.document_id:c.execute('INSERT INTO relation_sources VALUES(?,?,?,1)',(relation_id,body.document_id,h['published_revision']))
     return {'id':relation_id,'status':'candidate','message':'仅登记候选关系，不作为已确认事实'}
 
 @app.get('/api/tasks/{task_id}/evidence-graph')
@@ -122,6 +133,58 @@ def task_graph(task_id:str):
     for e in t['evidence']:
         nodes.append({'id':e['id'],'type':'evidence','label':e['label'],'properties':e['payload']|{'source':e['origin'],'observed_at':e['observed_at'],'classification':e['classification']}})
         edges.append({'id':e['id']+'-used','source':e['id'],'target':'decision' if t['result'] else task_id,'label':'冲突记录' if e['classification']=='conflict' else '引用','status':'candidate' if e['classification']=='conflict' else 'confirmed','origin':e['origin']})
-    return {'nodes':nodes,'edges':edges,'truncated':False,'scope':{'task_id':task_id,'snapshot':True},'mode':'historical-task-snapshot'}
+    return {'nodes':nodes,'edges':edges,'truncated':False,'scope':{'task_id':task_id,'snapshot':True},'mode':'historical-task-snapshot','knowledge_warnings':t['knowledge_warnings'],'knowledge_tracking':t['knowledge_tracking']}
+
+
+class MaintenanceInput(BaseModel):
+    model_config=ConfigDict(extra='forbid')
+    expected_generation:int=Field(ge=1)
+    reason:str=Field(min_length=1,max_length=1000)
+class RevisionInput(MaintenanceInput):
+    title:str=Field(min_length=1,max_length=200)
+    body:str=Field(min_length=1,max_length=100000)
+    version:str=Field(min_length=1,max_length=30)
+class ReviewInput(MaintenanceInput):
+    decision:Literal['approve','reject']
+class RelationReviewInput(MaintenanceInput):
+    expected_document_revision:int=Field(ge=1)
+
+def maintenance_write(operation,identifier,body):
+    from .knowledge import Conflict
+    try:
+        with connect(DB) as c:
+            c.execute('BEGIN IMMEDIATE')
+            return operation(c,identifier,body.model_dump())
+    except KeyError:raise HTTPException(404,'资料或关系不存在或不可访问')
+    except Conflict as e:raise HTTPException(409,str(e))
+
+@app.get('/api/documents/{document_id}/maintenance')
+def document_maintenance(document_id:str):
+    from .knowledge import maintenance
+    try:
+        with connect(DB) as c:
+            c.execute('BEGIN')
+            return maintenance(c,document_id)
+    except KeyError:raise HTTPException(404,'资料不存在或不可访问')
+
+@app.post('/api/documents/{document_id}/revisions',status_code=201)
+def document_revision(document_id:str,body:RevisionInput):
+    from .knowledge import revise
+    return maintenance_write(revise,document_id,body)
+
+@app.post('/api/documents/{document_id}/review')
+def document_review(document_id:str,body:ReviewInput):
+    from .knowledge import review
+    return maintenance_write(review,document_id,body)
+
+@app.post('/api/documents/{document_id}/withdraw')
+def document_withdraw(document_id:str,body:MaintenanceInput):
+    from .knowledge import withdraw
+    return maintenance_write(withdraw,document_id,body)
+
+@app.post('/api/relations/{relation_id}/review')
+def relation_review(relation_id:str,body:RelationReviewInput):
+    from .knowledge import review_relation
+    return maintenance_write(review_relation,relation_id,body)
 
 app.mount('/',StaticFiles(directory=ROOT/'static',html=True),name='frontend')
