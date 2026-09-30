@@ -7,6 +7,9 @@ services:
       - ontology-data:/app/data
     environment:
       ONTOLOGY_DB: /app/data/demo.sqlite3
+      ONTOLOGY_MODEL_URL: ${ONTOLOGY_MODEL_URL:-}
+      ONTOLOGY_MODEL_NAME: ${ONTOLOGY_MODEL_NAME:-}
+      ONTOLOGY_MODEL_KEY: ${ONTOLOGY_MODEL_KEY:-}
     restart: unless-stopped
 volumes:
   ontology-data:

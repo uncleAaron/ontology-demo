@@ -28,14 +28,19 @@ async def lifespan(app):
     yield
     stop.set();thread.join(timeout=15)
 
-app=FastAPI(title='Ontology Demo API',version='0.1.0',lifespan=lifespan)
+app=FastAPI(title='Ontology Workbench API',version='0.2.0',lifespan=lifespan)
 class TaskInput(BaseModel):
+    mode:Literal['demo','model']='demo'
     kind:Literal['complaint','operations','requirements','coding']
     scenario:Literal['unreleased','unverified','verified','conflict','stale']='unverified'
     prompt:str=Field(default='客户已经付款，订单仍显示未支付。请排查。',min_length=1,max_length=2000)
 
 @app.get('/api/health')
-def health():return {'status':'ok','mode':'demo','database':'sqlite','model_connected':False}
+def health():
+    from .model import ModelSettings,ModelError
+    try:ModelSettings.from_env();configured=True
+    except ModelError:configured=False
+    return {'status':'ok','mode':'demo-and-optional-model','database':'sqlite','model_connected':False,'model_configured':configured,'business_connectors':'simulated'}
 @app.get('/api/documents')
 def documents(q:str=Query('',max_length=100)):
     with connect(DB) as c:return [dict(r) for r in c.execute('SELECT * FROM documents WHERE project=? AND (instr(title,?)>0 OR instr(body,?)>0) ORDER BY id',(PROJECT,q,q))]
@@ -55,18 +60,24 @@ def paths(start:str,end:str,depth:int=Query(6,ge=1,le=6)):
     try:return find_path(DB,start,end,depth)
     except KeyError:raise HTTPException(404,'对象不存在或不可访问')
 @app.post('/api/tasks',status_code=202)
-def tasks_create(body:TaskInput):return {'id':create_task(DB,body.kind,body.scenario,body.prompt),'status':'queued'}
+def tasks_create(body:TaskInput):
+    if body.mode=='model':
+        from .model import ModelSettings,ModelError
+        try:ModelSettings.from_env()
+        except ModelError as e:raise HTTPException(503,str(e))
+    return {'id':create_task(DB,body.kind,body.scenario,body.prompt,body.mode),'status':'queued'}
 @app.get('/api/tasks')
 def tasks_list():
-    with connect(DB) as c:return [dict(r) for r in c.execute('SELECT id,kind,status,created_at FROM tasks ORDER BY created_at DESC LIMIT 30')]
+    with connect(DB) as c:return [dict(r) for r in c.execute('SELECT id,kind,mode,status,created_at FROM tasks ORDER BY created_at DESC LIMIT 30')]
 @app.get('/api/tasks/{task_id}')
 def task_get(task_id:str):
     with connect(DB) as c:
         r=c.execute('SELECT * FROM tasks WHERE id=?',(task_id,)).fetchone()
         if not r:raise HTTPException(404,'任务不存在')
         t=dict(r);t['result']=json.loads(t['result']) if t['result'] else None
-        t['evidence']=[dict(e)|{'payload':json.loads(e['payload'])} for e in c.execute('SELECT * FROM evidence WHERE task_id=?',(task_id,))]
-        t['steps']=[dict(e) for e in c.execute('SELECT * FROM steps WHERE task_id=? ORDER BY id',(task_id,))]
+        t['evidence']=[dict(e)|{'payload':json.loads(e['payload'])} for e in c.execute('SELECT * FROM evidence WHERE task_id=? AND attempt=?',(task_id,t['attempts']))]
+        t['steps']=[dict(e) for e in c.execute('SELECT * FROM steps WHERE task_id=? AND attempt=? ORDER BY id',(task_id,t['attempts']))]
+        t['tool_calls']=[dict(x)|{'arguments':json.loads(x['arguments']),'result':json.loads(x['result'])} for x in c.execute('SELECT * FROM tool_calls WHERE task_id=? AND attempt=? ORDER BY id',(task_id,t['attempts']))]
         return t
 class DocumentInput(BaseModel):
     title:str=Field(min_length=1,max_length=200)
@@ -110,7 +121,7 @@ def task_graph(task_id:str):
         edges.append({'id':'result','source':task_id,'target':'decision','label':'交付','status':'confirmed','origin':'任务记录'})
     for e in t['evidence']:
         nodes.append({'id':e['id'],'type':'evidence','label':e['label'],'properties':e['payload']|{'source':e['origin'],'observed_at':e['observed_at'],'classification':e['classification']}})
-        edges.append({'id':e['id']+'-used','source':e['id'],'target':'decision','label':'冲突记录' if e['classification']=='conflict' else '引用','status':'candidate' if e['classification']=='conflict' else 'confirmed','origin':e['origin']})
+        edges.append({'id':e['id']+'-used','source':e['id'],'target':'decision' if t['result'] else task_id,'label':'冲突记录' if e['classification']=='conflict' else '引用','status':'candidate' if e['classification']=='conflict' else 'confirmed','origin':e['origin']})
     return {'nodes':nodes,'edges':edges,'truncated':False,'scope':{'task_id':task_id,'snapshot':True},'mode':'historical-task-snapshot'}
 
 app.mount('/',StaticFiles(directory=ROOT/'static',html=True),name='frontend')

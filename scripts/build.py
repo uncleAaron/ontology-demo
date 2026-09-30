@@ -14,6 +14,6 @@ with tarfile.open(out/'ontology-demo.tar.gz','w:gz') as archive:
         for p in sorted((root/folder).rglob('*')):
             if p.is_file() and '__pycache__' not in p.parts:
                 archive.add(p,arcname='ontology-demo/'+str(p.relative_to(root)))
-    for name in ['README.md','requirements.txt','requirements-dev.txt','requirements.lock','Dockerfile','compose.yaml','Makefile','.dockerignore','.gitignore']:
+    for name in ['README.md','requirements.txt','requirements-dev.txt','requirements.lock','Dockerfile','compose.yaml','Makefile','.dockerignore','.gitignore','.env.example']:
         archive.add(root/name,arcname='ontology-demo/'+name)
 print(out/'ontology-demo.tar.gz')
