@@ -1,0 +1,12 @@
+services:
+  ontology:
+    build: .
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - ontology-data:/app/data
+    environment:
+      ONTOLOGY_DB: /app/data/demo.sqlite3
+    restart: unless-stopped
+volumes:
+  ontology-data:
