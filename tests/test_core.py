@@ -99,3 +99,11 @@ def test_api_task_lifecycle_and_evidence_graph(client):
     assert client.get('/api/graph',params={'center':'secret-service'}).status_code==404
     assert client.get('/api/graph',params={'depth':1000}).status_code==422
     assert client.post('/api/tasks',json={'kind':'unknown','scenario':'verified','prompt':'a'}).status_code==422
+
+def test_model_mode_without_configuration_is_rejected(client,monkeypatch):
+    for key in ['ONTOLOGY_MODEL_URL','ONTOLOGY_MODEL_NAME','ONTOLOGY_MODEL_KEY']:
+        monkeypatch.delenv(key,raising=False)
+    assert client.get('/api/health').json()['model_configured'] is False
+    response=client.post('/api/tasks',json={'kind':'complaint','scenario':'verified','prompt':'test','mode':'model'})
+    assert response.status_code==503
+    assert client.get('/api/tasks').json()==[]

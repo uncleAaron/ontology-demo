@@ -8,12 +8,16 @@ def object_dict(r):
 
 def graph(path,center='svc-payment',depth=2,status='confirmed',at='2026-09-30T00:00:00Z',limit=40,relation=None):
     with connect(path) as c:
+        c.execute('BEGIN')
         nodes={r['id']:object_dict(r) for r in c.execute('SELECT * FROM objects WHERE project=?',(PROJECT,))}
         if center not in nodes: raise KeyError('对象不存在或不可访问')
         edges=[]
         for r in c.execute('SELECT r.*,t.label FROM relations r JOIN relation_types t ON t.id=r.type'):
             d=dict(r)
             if d['source'] not in nodes or d['target'] not in nodes:continue
+            from .knowledge import relation_state
+            d=relation_state(c,d)
+            if d is None:continue
             if relation and d['type']!=relation:continue
             active=d['valid_from']<=at and (not d['valid_to'] or at<d['valid_to'])
             if status=='confirmed' and (d['status']!='confirmed' or not active):continue
@@ -30,7 +34,9 @@ def graph(path,center='svc-payment',depth=2,status='confirmed',at='2026-09-30T00
                 if nxt in visited:continue
                 if len(visited)>=limit:truncated=True;continue
                 visited.add(nxt);queue.append((nxt,level+1))
-        return {'nodes':[nodes[k] for k in sorted(visited)],'edges':[e for e in edges if e['source'] in visited and e['target'] in visited], 'truncated':truncated,'scope':{'project':PROJECT,'center':center,'depth':depth,'status':status,'at':at},'model_version':'1.0','mode':'seeded-demo'}
+        selected=[e for e in edges if e['source'] in visited and e['target'] in visited]
+        refs=[{'document_id':e['document_id'],'revision':e['source_revision']} for e in selected if e['document_id'] and e.get('source_revision')]
+        return {'nodes':[nodes[k] for k in sorted(visited)],'edges':selected,'knowledge_refs':refs, 'truncated':truncated,'scope':{'project':PROJECT,'center':center,'depth':depth,'status':status,'at':at},'model_version':'1.0','mode':'seeded-demo'}
 
 def find_path(path,start,end,depth=6):
     g=graph(path,start,depth,'confirmed',limit=100)

@@ -14,10 +14,12 @@ def now():return datetime.now(timezone.utc).isoformat()
 SCENARIOS={'unreleased','unverified','verified','conflict','stale'}
 KINDS={'complaint','operations','requirements','coding'}
 
-def create_task(path,kind,scenario,prompt):
+def create_task(path,kind,scenario,prompt,mode="demo",document_ids=None):
     tid='task-'+uuid.uuid4().hex[:12]
     with connect(path) as c:
-        c.execute('INSERT INTO tasks(id,kind,scenario,prompt,status,created_at) VALUES(?,?,?,?,?,?)',(tid,kind,scenario,prompt,'queued',now()))
+        from .retrieval import validate_selection
+        validate_selection(c,document_ids or [])
+        c.execute('INSERT INTO tasks(id,kind,scenario,prompt,status,created_at,mode,document_ids) VALUES(?,?,?,?,?,?,?,?)',(tid,kind,scenario,prompt,'queued',now(),mode,json.dumps(document_ids or [])))
     return tid
 
 def coding_fixture():
@@ -46,27 +48,63 @@ if __name__=="__main__":unittest.main()
             results.append({'stage':label,'exit_code':r.returncode,'output':r.stdout+r.stderr})
     return {'patch':''.join(difflib.unified_diff(before.splitlines(True),after.splitlines(True),fromfile='a/callback.py',tofile='b/callback.py')),'tests':results,'mode':'curated-fixture','limitation':'仅执行内置可信样例，不接受任意代码；此示例不是生产支付实现，也不是通用安全沙箱。'}
 
-def process_one(path):
+class LeaseLost(RuntimeError):pass
+
+def process_one(path,model_client=None):
+    from .model import ModelError
     with connect(path) as c:
         c.execute('BEGIN IMMEDIATE')
         c.execute("UPDATE tasks SET status='queued',lease_until=NULL WHERE status='running' AND lease_until<? AND attempts<3",(time.time(),))
         c.execute("UPDATE tasks SET status='failed',error='重试次数已耗尽' WHERE status='running' AND lease_until<? AND attempts>=3",(time.time(),))
         row=c.execute("SELECT * FROM tasks WHERE status='queued' ORDER BY created_at LIMIT 1").fetchone()
         if not row:return False
-        task=dict(row)
-        c.execute("UPDATE tasks SET status='running',started_at=?,lease_until=?,attempts=attempts+1 WHERE id=?",(now(),time.time()+60,task['id']))
-    try:
-        result,evidence=execute(task)
+        task=dict(row);task['attempts']+=1;token=uuid.uuid4().hex
+        c.execute("UPDATE tasks SET status='running',started_at=?,lease_until=?,attempts=attempts+1,worker_token=? WHERE id=?",(now(),time.time()+60,token,task['id']))
+    def own(c):
+        r=c.execute('SELECT status,worker_token,lease_until FROM tasks WHERE id=?',(task['id'],)).fetchone()
+        if not r or r['status']!='running' or r['worker_token']!=token or r['lease_until']<time.time():raise LeaseLost()
+    def heartbeat():
         with connect(path) as c:
-            c.execute('DELETE FROM evidence WHERE task_id=?',(task['id'],));c.execute('DELETE FROM steps WHERE task_id=?',(task['id'],))
-            for idx,e in enumerate(evidence):
-                c.execute('INSERT INTO evidence VALUES(?,?,?,?,?,?,?)',(f"{task['id']}-e{idx}",task['id'],e['label'],json.dumps(e['payload'],ensure_ascii=False),e['origin'],now(),e['classification']))
-            steps=[('确定任务范围','支付演示项目；仅使用预置对象与可信样例'),('获取上下文','排障手册、需求验收标准和已确认对象关联'),('核实证据','模拟连接器返回部署与验证记录；对比来源和时效'),('交付结果','记录确定性判断、未验证范围与交付物；未执行外部动作')]
-            for label,detail in steps:c.execute('INSERT INTO steps(task_id,label,detail,created_at) VALUES(?,?,?,?)',(task['id'],label,detail,now()))
-            c.execute("UPDATE tasks SET status='completed',result=?,completed_at=?,lease_until=NULL WHERE id=?",(json.dumps(result,ensure_ascii=False),now(),task['id']))
-    except Exception:
-        with connect(path) as c:c.execute("UPDATE tasks SET status='failed',error='任务执行失败，请查看服务日志',lease_until=NULL WHERE id=?",(task['id'],))
-        import logging;logging.exception('Task failed: %s',task['id'])
+            c.execute('BEGIN IMMEDIATE');own(c)
+            c.execute('UPDATE tasks SET lease_until=? WHERE id=?',(time.time()+60,task['id']))
+    def save_evidence(c,e,idx):
+        c.execute('INSERT OR IGNORE INTO evidence(id,task_id,label,payload,origin,observed_at,classification,attempt) VALUES(?,?,?,?,?,?,?,?)',(e.get('id',f"{task['id']}-a{task['attempts']}-e{idx}"),task['id'],e['label'],json.dumps(e['payload'],ensure_ascii=False),e['origin'],now(),e['classification'],task['attempts']))
+        for ref in e['payload'].get('knowledge_refs',[]):
+            c.execute('INSERT OR IGNORE INTO task_knowledge_refs VALUES(?,?,?,?,?)',(task['id'],task['attempts'],e.get('id',f"{task['id']}-a{task['attempts']}-e{idx}"),ref['document_id'],ref['revision']))
+            if ref.get('knowledge_id'):
+                c.execute('INSERT OR IGNORE INTO task_derived_refs VALUES(?,?,?,?,?)',(task['id'],task['attempts'],e['id'],ref['knowledge_id'],ref['knowledge_generation']))
+    def record(name,args,status,result,evidence=None):
+        with connect(path) as c:
+            c.execute('BEGIN IMMEDIATE');own(c)
+            c.execute('INSERT INTO tool_calls(task_id,attempt,name,arguments,status,result,created_at) VALUES(?,?,?,?,?,?,?)',(task['id'],task['attempts'],name,json.dumps(args,ensure_ascii=False),status,json.dumps(result,ensure_ascii=False),now()))
+            c.execute('INSERT INTO steps(task_id,label,detail,created_at,attempt) VALUES(?,?,?,?,?)',(task['id'],name,'工具／模型调用：'+status,now(),task['attempts']))
+            if evidence:save_evidence(c,evidence,0)
+    try:
+        if task['mode']=='model':
+            from .agent import run_agent
+            result,evidence=run_agent(path,task,client=model_client,heartbeat=heartbeat,record=record)
+        else:
+            result,evidence=execute(task)
+            # Fixed templates use only their original seed baseline, never endorse a new source revision.
+            evidence[0]['payload']['knowledge_refs']=[{'document_id':d,'revision':1} for d in ['kb-runbook','kb-release','kb-accept']]
+        with connect(path) as c:
+            c.execute('BEGIN IMMEDIATE');own(c)
+            for idx,e in enumerate(evidence):save_evidence(c,e,idx)
+            from .knowledge import task_warnings,block_result
+            result=block_result(result,task_warnings(c,task['id'],task['attempts']))
+            if task['mode']=='demo':
+                steps=[('确定任务范围','支付演示项目；仅使用预置对象与可信样例'),('获取上下文','排障手册、需求验收标准和已确认对象关联'),('核实证据','模拟连接器返回部署与验证记录；对比来源和时效'),('交付结果','记录确定性判断、未验证范围与交付物；未执行外部动作')]
+                for label,detail in steps:c.execute('INSERT INTO steps(task_id,label,detail,created_at,attempt) VALUES(?,?,?,?,?)',(task['id'],label,detail,now(),task['attempts']))
+            c.execute("UPDATE tasks SET status=?,result=?,completed_at=?,lease_until=NULL WHERE id=?",('partial' if result.get('partial') else 'completed',json.dumps(result,ensure_ascii=False),now(),task['id']))
+    except LeaseLost:
+        pass  # An expired owner cannot overwrite the current attempt.
+    except Exception as exc:
+        message=str(exc) if isinstance(exc,ModelError) else '任务执行失败，请检查服务配置或工具状态'
+        with connect(path) as c:
+            c.execute("UPDATE tasks SET status='failed',error=?,lease_until=NULL WHERE id=? AND worker_token=? AND status='running'",(message,task['id'],token))
+        import logging
+        if isinstance(exc,ModelError):logging.error('Task %s failed (%s)',task['id'],type(exc).__name__)
+        else:logging.exception('Task %s failed unexpectedly',task['id'])
     return True
 
 def execute(task):
