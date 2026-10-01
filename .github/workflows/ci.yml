@@ -27,4 +27,5 @@ jobs:
           npm install --prefix "$RUNNER_TEMP/ontology-ui" --ignore-scripts --no-audit --no-fund jsdom@30.1.1
           NODE_PATH="$RUNNER_TEMP/ontology-ui/node_modules" node scripts/check-maintenance-ui.cjs
           NODE_PATH="$RUNNER_TEMP/ontology-ui/node_modules" node scripts/check-retrieval-ui.cjs
+          NODE_PATH="$RUNNER_TEMP/ontology-ui/node_modules" node scripts/check-processing-ui.cjs
       - run: python scripts/build.py

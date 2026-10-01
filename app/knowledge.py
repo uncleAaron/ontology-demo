@@ -35,9 +35,11 @@ def migrate(c):
     c.execute("INSERT OR IGNORE INTO document_revisions SELECT id,1,title,body,version,'既有演示资料迁移',? FROM documents",(now(),))
     c.execute("INSERT OR IGNORE INTO document_heads SELECT id,1,1,1,'active' FROM documents")
     c.execute('INSERT OR IGNORE INTO relation_sources SELECT id,document_id,1,1 FROM relations WHERE document_id IS NOT NULL')
-    c.execute("INSERT OR REPLACE INTO meta VALUES('schema_version','4')")
+    c.execute("INSERT OR REPLACE INTO meta VALUES('schema_version','5')")
     from .retrieval import migrate as migrate_chunks
     migrate_chunks(c)
+    from .processing import migrate as migrate_processing
+    migrate_processing(c)
 
 def event(c,doc_id,action,revision,reason,details=None):
     c.execute('INSERT INTO maintenance_events(document_id,action,revision,reason,actor,details,created_at) VALUES(?,?,?,?,?,?,?)',
@@ -122,10 +124,15 @@ def valid_refs(c,refs):
             warnings.append({'document_id':ref['document_id'],'revision':ref['revision'],'status':'unavailable'});continue
         if h['status']!='active' or h['published_revision']!=ref['revision']:
             warnings.append(dict(ref,status=h['status'],current_revision=h['revision']))
+        if ref.get('knowledge_id'):
+            k=c.execute('SELECT k.status,k.generation,j.source_generation FROM knowledge_candidates k JOIN processing_jobs j ON j.id=k.job_id WHERE k.id=? AND j.document_id=?',(ref['knowledge_id'],ref['document_id'])).fetchone()
+            if not k or k['status']!='active' or k['generation']!=ref['knowledge_generation'] or k['source_generation']!=h['generation']:
+                warnings.append(dict(ref,status='knowledge_unavailable'))
     return warnings
 
 def task_warnings(c,task_id,attempt):
     refs=[dict(r) for r in c.execute('SELECT DISTINCT document_id,revision FROM task_knowledge_refs WHERE task_id=? AND attempt=?',(task_id,attempt))]
+    refs.extend(dict(r) for r in c.execute('SELECT j.document_id,j.revision,k.candidate_id knowledge_id,k.generation knowledge_generation FROM task_derived_refs k JOIN knowledge_candidates i ON i.id=k.candidate_id JOIN processing_jobs j ON j.id=i.job_id WHERE k.task_id=? AND k.attempt=?',(task_id,attempt)))
     return valid_refs(c,refs)
 
 def block_result(result,warnings):

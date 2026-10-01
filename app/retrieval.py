@@ -107,6 +107,8 @@ def initial_context(c,task):
     ids=selected_ids(task)
     validate_selection(c,ids)
     output=search(c,task['prompt'],ids,8)
+    from .processing import search_derived
+    output['knowledge_items']=search_derived(c,task['prompt'],ids,3)
     if not output['chunks'] and ids:
         # A selected document is never silently ignored. Bounded opening excerpts help navigation.
         scope,params=scope_sql(ids)

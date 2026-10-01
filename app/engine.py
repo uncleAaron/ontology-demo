@@ -71,6 +71,8 @@ def process_one(path,model_client=None):
         c.execute('INSERT OR IGNORE INTO evidence(id,task_id,label,payload,origin,observed_at,classification,attempt) VALUES(?,?,?,?,?,?,?,?)',(e.get('id',f"{task['id']}-a{task['attempts']}-e{idx}"),task['id'],e['label'],json.dumps(e['payload'],ensure_ascii=False),e['origin'],now(),e['classification'],task['attempts']))
         for ref in e['payload'].get('knowledge_refs',[]):
             c.execute('INSERT OR IGNORE INTO task_knowledge_refs VALUES(?,?,?,?,?)',(task['id'],task['attempts'],e.get('id',f"{task['id']}-a{task['attempts']}-e{idx}"),ref['document_id'],ref['revision']))
+            if ref.get('knowledge_id'):
+                c.execute('INSERT OR IGNORE INTO task_derived_refs VALUES(?,?,?,?,?)',(task['id'],task['attempts'],e['id'],ref['knowledge_id'],ref['knowledge_generation']))
     def record(name,args,status,result,evidence=None):
         with connect(path) as c:
             c.execute('BEGIN IMMEDIATE');own(c)

@@ -192,4 +192,4 @@ def test_schema_upgrade_preserves_old_tasks(tmp_path):
     init(p);init(p)
     with connect(p) as c:
         assert c.execute("SELECT mode FROM tasks WHERE id='old'").fetchone()[0]=='demo'
-        assert c.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0]=='4'
+        assert c.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0]=='5'

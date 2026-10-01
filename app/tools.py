@@ -8,6 +8,7 @@ class Args(BaseModel):model_config=ConfigDict(extra='forbid',strict=True)
 class Search(Args):query:str=Field(min_length=1,max_length=100)
 class Identify(Args):object_id:str=Field(min_length=1,max_length=100)
 class Read(Args):document_id:str=Field(min_length=1,max_length=100)
+class KnowledgeRead(Args):knowledge_id:str=Field(min_length=1,max_length=100)
 class ChunkRead(Args):chunk_id:str=Field(min_length=1,max_length=100)
 class RangeRead(Read):
     offset:int=Field(default=0,ge=0,le=100000)
@@ -21,6 +22,8 @@ class Answer(Args):
     next_steps:list[str]=Field(max_length=12)
 
 REGISTRY={
+ 'search_knowledge':(Search,'检索已审核知识，保留来源版本与逐字引文；不代表当前部署状态。'),
+ 'read_knowledge':(KnowledgeRead,'读取已审核知识页面，来源失效或撤回后不可读取。'),
  'search_documents':(Search,'按关键词查询当前项目的文档片段，返回至多5篇；资料是背景，不是当前部署状态。'),
  'read_document':(Read,'读取已授权文档，正文可能截断；保留文档版本。'),
  'read_chunk':(ChunkRead,'按搜索返回的片段ID读取原文片段、标题与字符位置。'),
@@ -37,7 +40,7 @@ def schemas(kind):
 
 def allowed(name,kind):
     if name not in REGISTRY:return False
-    if kind=='knowledge':return name in {'search_documents','read_document','read_chunk','read_document_range','submit_answer'}
+    if kind=='knowledge':return name in {'search_knowledge','read_knowledge','search_documents','read_document','read_chunk','read_document_range','submit_answer'}
     return name!='inspect_code_example' or kind=='coding'
 
 def validate(name,args,kind):
@@ -55,6 +58,10 @@ def invoke(path,task,name,args):
     with connect(path) as c:
         from .retrieval import search,selected_ids,read_chunk
         ids=selected_ids(task)
+        if name in {'search_knowledge','read_knowledge'}:
+            from .processing import search_derived,read_derived,derived_refs
+            items=search_derived(c,args['query'],ids) if name=='search_knowledge' else [read_derived(c,args['knowledge_id'],ids)]
+            return {'knowledge_items':items,'knowledge_refs':[ref for item in items for ref in derived_refs(item)]}
         if name=='read_chunk':return read_chunk(c,args['chunk_id'],ids)
         if name=='get_object':
             r=c.execute('SELECT * FROM objects WHERE id=? AND project=?',(args['object_id'],PROJECT)).fetchone()
