@@ -68,7 +68,7 @@ class ModelClient:
             if not isinstance(message,dict):raise ModelError('模型响应缺少有效的 message')
             calls=message.get('tool_calls') or []
             if not isinstance(calls,list):raise ModelError('模型 tool_calls 必须是数组')
-            if len(calls)>4:raise ModelError('模型一次请求的工具数量过多（最多4个）')
+            if len(calls)>s.max_calls:raise ModelError('模型一次请求的工具数量超过任务总额度')
             ids=set();clean=[]
             for call in calls:
                 f=call['function'];cid=call['id']

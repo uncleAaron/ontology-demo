@@ -63,13 +63,34 @@ def test_reasoning_is_preserved_across_tool_rounds(db):
 
 @pytest.mark.parametrize('choice,reason',[
     ({'message':call('inspect_runtime',{}),'finish_reason':'length'},'截断'),
-    ({'message':{'tool_calls':[{}]*5}},'工具数量过多'),
+    ({'message':{'tool_calls':[{}]*13}},'超过任务总额度'),
     ({'message':{'tool_calls':'bad'}},'必须是数组'),
     ({},'message'),
 ])
 def test_specific_protocol_errors(choice,reason):
     client=ModelClient(settings(),httpx.MockTransport(lambda req:httpx.Response(200,json={'choices':[choice]})))
     with pytest.raises(ModelError,match=reason):client.complete([],[])
+
+def test_five_tools_in_one_round_are_executed(db):
+    def handler(req):
+        messages=json.loads(req.content)['messages']
+        if any(m['role']=='tool' for m in messages):
+            message=submit(messages)
+        else:
+            message=call('search_documents',{'query':'支付'})
+            message['tool_calls']=[call('search_documents',{'query':'支付'},f'c{i}')['tool_calls'][0] for i in range(5)]
+        return httpx.Response(200,json={'choices':[{'message':message}]})
+    result,evidence=run_agent(db,{'id':'t','kind':'complaint','prompt':'排查'},ModelClient(settings(),httpx.MockTransport(handler)))
+    assert len(evidence)==5 and len(result['citations'])==5
+
+def test_over_remaining_budget_executes_none_of_batch(db):
+    first=call('search_documents',{'query':'支付'})
+    second=call('search_documents',{'query':'支付'},'c2')
+    second['tool_calls'].append(call('search_documents',{'query':'支付'},'c3')['tool_calls'][0])
+    client=ScriptedClient([first,second]);client.settings=replace(settings(),max_calls=2)
+    result,evidence=run_agent(db,{'id':'t','kind':'complaint','prompt':'排查'},client)
+    assert result['partial'] and len(evidence)==1
+    assert '剩余额度' in result['artifacts'][0]['text']
 
 def test_timeout_and_context_budget():
     def slow(req):raise httpx.ReadTimeout('provider details secret-test-key')

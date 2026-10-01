@@ -33,7 +33,8 @@ def run_agent(path,task,client=None,heartbeat=lambda:None,record=lambda *args:No
         record('model_request',{'round':round_index+1},'ok',{'tools':[x['function']['name'] for x in tool_calls]})
         if not tool_calls:
             messages.extend([message,{'role':'user','content':'请通过工具取证，最后调用 submit_answer。'}]);continue
-        if len(tool_calls)>4:raise ModelError('模型一次请求的工具数量过多')
+        if len(tool_calls)>settings.max_calls-calls:
+            return partial(evidence,'本轮工具调用超过任务剩余额度，未执行本轮工具')
         messages.append(message)
         for call in tool_calls:
             heartbeat();calls+=1
