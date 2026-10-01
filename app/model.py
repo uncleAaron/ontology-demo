@@ -56,17 +56,32 @@ class ModelClient:
                         raw.extend(block)
                         if len(raw)>512000 or time.monotonic()-start>s.timeout:raise ModelError('模型响应超过大小或时间上限')
                 payload=json.loads(raw)
-            message=payload['choices'][0]['message']
-            if not isinstance(message,dict):raise ValueError()
+            if not isinstance(payload,dict) or not isinstance(payload.get('choices'),list) or not payload['choices']:
+                raise ModelError('模型响应缺少有效的 choices')
+            choice=payload['choices'][0]
+            if not isinstance(choice,dict):raise ModelError('模型响应的 choice 格式无效')
+            if choice.get('finish_reason')=='length':
+                raise ModelError('模型输出达到 token 上限而被截断，请缩小任务或增加输出预算')
+            if choice.get('finish_reason') in {'content_filter','insufficient_system_resource'}:
+                raise ModelError('模型服务未完成生成：内容过滤或资源不足')
+            message=choice.get('message')
+            if not isinstance(message,dict):raise ModelError('模型响应缺少有效的 message')
             calls=message.get('tool_calls') or []
-            if not isinstance(calls,list) or len(calls)>4:raise ValueError()
+            if not isinstance(calls,list):raise ModelError('模型 tool_calls 必须是数组')
+            if len(calls)>4:raise ModelError('模型一次请求的工具数量过多（最多4个）')
             ids=set();clean=[]
             for call in calls:
                 f=call['function'];cid=call['id']
                 if not isinstance(cid,str) or not cid or cid in ids or call.get('type')!='function':raise ValueError()
                 if not isinstance(f['name'],str) or not isinstance(f['arguments'],str) or len(f['arguments'])>12000:raise ValueError()
                 ids.add(cid);clean.append({'id':cid,'type':'function','function':{'name':f['name'],'arguments':f['arguments']}})
-            return {'role':'assistant','content':None,'tool_calls':clean}
+            result={'role':'assistant','content':message.get('content'),'tool_calls':clean}
+            if result['content'] is not None and not isinstance(result['content'],str):raise ValueError()
+            if 'reasoning_content' in message:
+                reasoning=message['reasoning_content']
+                if reasoning is not None and not isinstance(reasoning,str):raise ValueError()
+                result['reasoning_content']=reasoning
+            return result
         except ModelError:raise
         except httpx.TimeoutException:raise ModelError('模型请求超时，请稍后重试') from None
         except httpx.HTTPError:raise ModelError('无法连接模型服务') from None

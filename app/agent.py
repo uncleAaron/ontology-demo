@@ -32,7 +32,7 @@ def run_agent(path,task,client=None,heartbeat=lambda:None,record=lambda *args:No
         tool_calls=message.get('tool_calls') or []
         record('model_request',{'round':round_index+1},'ok',{'tools':[x['function']['name'] for x in tool_calls]})
         if not tool_calls:
-            messages.extend([{'role':'assistant','content':'未提交结构化工具结果。'},{'role':'user','content':'请通过工具取证，最后调用 submit_answer。'}]);continue
+            messages.extend([message,{'role':'user','content':'请通过工具取证，最后调用 submit_answer。'}]);continue
         if len(tool_calls)>4:raise ModelError('模型一次请求的工具数量过多')
         messages.append(message)
         for call in tool_calls:

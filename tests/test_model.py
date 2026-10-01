@@ -47,6 +47,30 @@ def test_malformed_provider(response):
     client=ModelClient(settings(),httpx.MockTransport(lambda req:httpx.Response(200,json=response)))
     with pytest.raises(ModelError):client.complete([],[])
 
+def test_reasoning_is_preserved_across_tool_rounds(db):
+    def handler(req):
+        messages=json.loads(req.content)['messages']
+        if not any(m['role']=='tool' for m in messages):
+            message=call('inspect_runtime',{})|{'reasoning_content':'检查运行证据','content':'先取证'}
+        else:
+            prior=next(m for m in messages if m['role']=='assistant')
+            assert prior['reasoning_content']=='检查运行证据'
+            assert prior['content']=='先取证'
+            message=submit(messages)
+        return httpx.Response(200,json={'choices':[{'message':message,'finish_reason':'tool_calls'}]})
+    result,evidence=run_agent(db,{'id':'t','kind':'complaint','prompt':'排查','scenario':'unverified'},ModelClient(settings(),httpx.MockTransport(handler)))
+    assert evidence and result['citations']
+
+@pytest.mark.parametrize('choice,reason',[
+    ({'message':call('inspect_runtime',{}),'finish_reason':'length'},'截断'),
+    ({'message':{'tool_calls':[{}]*5}},'工具数量过多'),
+    ({'message':{'tool_calls':'bad'}},'必须是数组'),
+    ({},'message'),
+])
+def test_specific_protocol_errors(choice,reason):
+    client=ModelClient(settings(),httpx.MockTransport(lambda req:httpx.Response(200,json={'choices':[choice]})))
+    with pytest.raises(ModelError,match=reason):client.complete([],[])
+
 def test_timeout_and_context_budget():
     def slow(req):raise httpx.ReadTimeout('provider details secret-test-key')
     with pytest.raises(ModelError,match='超时'):ModelClient(settings(),httpx.MockTransport(slow)).complete([],[])
