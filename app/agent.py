@@ -1,7 +1,7 @@
 """Bounded tool loop; provider text never grants action permission or verified status."""
 import json
 import time
-from .model import ModelClient,ModelSettings,ModelError
+from .model import ModelClient,ModelSettings,ModelError,ModelOutputTruncated,ModelToolBudgetExceeded
 from .tools import schemas,validate,invoke
 from .db import connect
 
@@ -37,6 +37,7 @@ def run_agent(path,task,client=None,heartbeat=lambda:None,record=lambda *args:No
         result,evidence=partial(evidence,'没有匹配的有效资料，请选择文档或补充关键词；未请求模型，也未使用支付样例代替依据')
         result['mode']='model-assisted-knowledge'
         return result,evidence
+    closing_next=False;closing_reason='';last_metrics={};truncations=0
     for round_index in range(settings.max_rounds):
         if time.monotonic()-start>180:break
         heartbeat()
@@ -44,16 +45,52 @@ def run_agent(path,task,client=None,heartbeat=lambda:None,record=lambda *args:No
         with connect(path) as c:
             warnings=valid_refs(c,[ref for e in evidence for ref in e['payload'].get('knowledge_refs',[])])
         if warnings:return block_result({'mode':'model-assisted-knowledge' if task['kind']=='knowledge' else 'model-assisted-simulation','scope':'当前项目资料'},warnings),evidence
-        try:message=client.complete(messages,schemas(task['kind']))
+        closing=closing_next or calls>=settings.max_calls-1 or round_index==settings.max_rounds-1 or time.monotonic()-start>=180-settings.timeout
+        if closing and not closing_reason:
+            closing_reason='查询额度已用完，预留最终提交。' if calls>=settings.max_calls-1 else '接近模型轮次或时间上限，使用已有证据收尾。'
+        remaining=max(0,settings.max_calls-1-calls)
+        request_tools=schemas(task['kind'])
+        if closing:request_tools=[t for t in request_tools if t['function']['name']=='submit_answer']
+        guidance=('本轮仅允许 submit_answer，依据已取得证据提交简洁草稿，证据缺口写入 unknowns。禁止继续查询。'+closing_reason) if closing else f'最多再查询 {remaining} 次；已为最终 submit_answer 预留一次工具调用。已有足够依据请立即提交，不重复读取相同资料。'
+        request_messages=[dict(m) for m in messages]
+        request_messages[0]['content']+='\n服务端预算约束：'+guidance
+        try:
+            from .context import assemble
+            request_messages,last_metrics=assemble(request_messages,evidence,settings,request_tools,closing)
+        except ValueError as e:
+            record('context_budget',{'round':round_index+1},'error',{'message':str(e)})
+            return partial(evidence,str(e))
+        record('context_budget',{'round':round_index+1},'ok',last_metrics)
+        try:message=client.complete(request_messages,request_tools)
+        except ModelToolBudgetExceeded as e:
+            record('model_request',{'round':round_index+1},'error',{'message':str(e),'closing':closing})
+            if not closing and round_index+1<settings.max_rounds:
+                closing_next=True;closing_reason='模型查询批次超过任务总额度，未执行；请使用已有证据提交。'
+                continue
+            return partial(evidence,'收尾轮仍请求超额工具，未执行查询或交付草稿')
+        except ModelOutputTruncated as e:
+            record('model_request',{'round':round_index+1},'error',{'message':str(e),'closing':closing})
+            truncations+=1
+            if not closing and truncations==1 and round_index+1<settings.max_rounds:
+                closing_next=True;closing_reason='上一轮输出截断；不要延续不完整工具调用，重新提交已有证据的短结论。'
+                continue
+            return partial(evidence,'模型输出截断，受限收尾未完成；未保存不完整草稿')
         except ModelError as e:
             record('model_request',{'round':round_index+1},'error',{'message':str(e)})
             raise
         tool_calls=message.get('tool_calls') or []
         record('model_request',{'round':round_index+1},'ok',{'tools':[x['function']['name'] for x in tool_calls]})
         if not tool_calls:
+            if closing:return partial(evidence,'收尾轮未提交结构化结果，已停止模型调用')
             messages.extend([message,{'role':'user','content':'请通过工具取证，最后调用 submit_answer。'}]);continue
-        if len(tool_calls)>settings.max_calls-calls:
-            return partial(evidence,'本轮工具调用超过任务剩余额度，未执行本轮工具')
+        submit_only=len(tool_calls)==1 and tool_calls[0]['function']['name']=='submit_answer'
+        if closing and not submit_only:
+            record('closing_rejected',{},'rejected',{'message':'收尾轮仅允许提交，未执行查询工具'})
+            return partial(evidence,'模型在收尾轮继续请求查询，超过任务剩余额度；未执行本轮工具')
+        if not submit_only and len(tool_calls)>remaining:
+            record('batch_skipped',{'requested_calls':len(tool_calls),'remaining_queries':remaining},'rejected',{'message':'本轮未执行；转入仅提交的收尾轮'})
+            closing_next=True;closing_reason='上一批查询超过剩余额度，未执行；请使用已有证据提交。'
+            continue
         messages.append(message)
         for call in tool_calls:
             heartbeat();calls+=1
@@ -69,6 +106,8 @@ def run_agent(path,task,client=None,heartbeat=lambda:None,record=lambda *args:No
                     decision=runtime['rule_decision'] if runtime and is_analysis else ('insufficient' if is_analysis else 'draft')
                     result={'title':runtime['title'] if runtime and is_analysis else '模型分析草稿已生成','decision':decision,'rule_version':'fix-confirmation@1','scope':'指定资料' if selected_ids(task) else '当前项目资料；业务工具使用模拟数据','mode':'model-assisted-knowledge' if task['kind']=='knowledge' else 'model-assisted-simulation','model':settings.model,'external_actions':False,'citations':valid['citations'],'next_action':'人工核对模型草稿及引用内容','artifacts':[{'title':'模型草稿（未审核）','text':valid['summary']},{'title':'未知项与下一步','text':'未知项：\n'+'\n'.join(valid['unknowns'])+'\n下一步：\n'+'\n'.join(valid['next_steps'])}],'notice':'引用ID已校验存在；这不等于模型每句话已被来源支持。规则结论由程序计算，模型不能修改。'}
                     if coding:result['coding']=coding
+                    result['budget']={'model_rounds':round_index+1,'tool_calls':calls,'tool_limit':settings.max_calls,'closing':closing,
+                                      'closing_reason':closing_reason,'truncations':truncations,'context':last_metrics}
                     with connect(path) as c:warnings=valid_refs(c,[ref for e in evidence for ref in e['payload'].get('knowledge_refs',[])])
                     return block_result(result,warnings),evidence
                 output=invoke(path,task,name,valid)
@@ -84,6 +123,7 @@ def run_agent(path,task,client=None,heartbeat=lambda:None,record=lambda *args:No
                 # Do not echo schema errors containing user/provider input.
                 returned={'error':'工具或参数无效、对象不可访问、或引用不存在。请核对允许工具及返回的证据ID。'}
                 record(name if name in {x['function']['name'] for x in schemas(task['kind'])} else 'rejected_tool',{},'rejected',returned)
+                if closing:return partial(evidence,'收尾提交未通过工具或引用校验，未交付模型草稿')
                 if errors>=3:return partial(evidence,'连续工具错误达到上限')
             messages.append({'role':'tool','tool_call_id':call['id'],'content':json.dumps(returned,ensure_ascii=False)})
     return partial(evidence,'模型轮数或时间达到上限')

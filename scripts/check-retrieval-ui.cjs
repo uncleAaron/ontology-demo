@@ -4,7 +4,7 @@ const fs=require('node:fs'),path=require('node:path'),os=require('node:os'),http
 const {spawn}=require('node:child_process');
 const assert=require('node:assert/strict');
 const root=path.resolve(__dirname,'..'),temp=fs.mkdtempSync(path.join(os.tmpdir(),'retrieval-ui-'));
-let server,dom;const modelErrors=[];
+let server,dom,modelCalls=0;const modelErrors=[],serverLogs=[];
 const model=http.createServer(async(req,res)=>{
  try{
   let raw='';for await(const part of req)raw+=part;
@@ -13,6 +13,13 @@ const model=http.createServer(async(req,res)=>{
   const context=JSON.parse(message.content.slice(message.content.indexOf('：')+1));
   assert(context.evidence.some(e=>e.data.chunk.body.includes('AURORA-729')));
   assert(context.evidence.every(e=>e.data.chunk.document_id===context.scope_document_ids[0]));
+  modelCalls++;
+  if(modelCalls===1){
+   const calls=Array.from({length:12},(_,i)=>({id:'search'+i,type:'function',function:{name:'search_documents',arguments:JSON.stringify({query:'北极校验码'})}}));
+   res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({choices:[{finish_reason:'tool_calls',message:{role:'assistant',content:null,tool_calls:calls}}]}));return;
+  }
+  assert.deepEqual(body.tools.map(t=>t.function.name),['submit_answer']);
+  assert.deepEqual(body.tool_choice,{type:'function',function:{name:'submit_answer'}});
   const args={summary:'北极校验码为 AURORA-729。',citations:[context.evidence[0].evidence_id],unknowns:[],next_steps:[]};
   res.writeHead(200,{'Content-Type':'application/json'});
   res.end(JSON.stringify({choices:[{finish_reason:'tool_calls',message:{role:'assistant',content:null,tool_calls:[{id:'submit',type:'function',function:{name:'submit_answer',arguments:JSON.stringify(args)}}]}}]}));
@@ -22,7 +29,8 @@ const until=async(fn)=>{for(let i=0;i<250;i++){if(fn())return;await new Promise(
 (async()=>{
  await new Promise(r=>model.listen(0,'127.0.0.1',r));
  const port=process.env.ONTOLOGY_RETRIEVAL_UI_PORT||'8768',base='http://127.0.0.1:'+port;
- server=spawn(process.env.PYTHON||'python3',['-m','uvicorn','app.main:app','--host','127.0.0.1','--port',port],{cwd:root,env:{...process.env,ONTOLOGY_DB:path.join(temp,'test.sqlite3'),ONTOLOGY_MODEL_URL:`http://127.0.0.1:${model.address().port}/chat/completions`,ONTOLOGY_MODEL_NAME:'mock',ONTOLOGY_MODEL_KEY:'local-test'},stdio:'ignore'});
+ server=spawn(process.env.PYTHON||'python3',['-m','uvicorn','app.main:app','--host','127.0.0.1','--port',port],{cwd:root,env:{...process.env,HTTP_PROXY:'',HTTPS_PROXY:'',ALL_PROXY:'',http_proxy:'',https_proxy:'',all_proxy:'',NO_PROXY:'*',no_proxy:'*',ONTOLOGY_DB:path.join(temp,'test.sqlite3'),ONTOLOGY_MODEL_URL:`http://127.0.0.1:${model.address().port}/chat/completions`,ONTOLOGY_MODEL_NAME:'mock',ONTOLOGY_MODEL_KEY:'local-test'},stdio:['ignore','ignore','pipe']});
+ server.stderr.on('data',data=>serverLogs.push(data.toString()));
  let ready=false;for(let i=0;i<100;i++){try{if((await fetch(base+'/api/health')).ok){ready=true;break;}}catch{}await new Promise(r=>setTimeout(r,50));}assert(ready);
  const post=async(url,body)=>{const response=await fetch(base+url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});assert(response.ok,await response.clone().text());return response.json();};
  const source=await post('/api/documents',{title:'<script>测试航线手册</script>',body:'背景文字与人工流程。\n'.repeat(800)+'\n# 北极校验\n北极校验码为 AURORA-729。'});
@@ -37,7 +45,8 @@ const until=async(fn)=>{for(let i=0;i<250;i++){if(fn())return;await new Promise(
  for(const o of get('#task-documents').options)o.selected=o.value===source.id;
  get('#task-prompt').value='北极校验码是多少';get('#run-task').click();
  await until(()=>get('#task-result').textContent.includes('北极校验码为 AURORA-729。')&&get('[data-chunk]'));
- assert(get('#task-result').textContent.includes('最终引用'));assert.equal(get('#task-result script'),null);
+  assert(get('#task-result').textContent.includes('最终引用'));assert.equal(get('#task-result script'),null);
+  assert(get('#task-result').textContent.includes('已根据现有证据收尾'),JSON.stringify({calls:modelCalls,errors:modelErrors,uiErrors:errors,status:get('#task-status').textContent,serverLogs}));assert.equal(modelCalls,2);
  get('[data-chunk]').click();await until(()=>get('#chunk-preview').textContent.includes('当前有效原文片段'));
  await post('/api/documents/'+source.id+'/withdraw',{expected_generation:1,reason:'撤回联测'});
  get('[data-chunk]').click();await until(()=>get('#chunk-preview').textContent.includes('历史原文片段'));

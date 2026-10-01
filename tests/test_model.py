@@ -152,7 +152,7 @@ def test_agent_runtime_gate_and_citations(db,scenario,expected):
         prepared=c.execute("SELECT count(*) FROM tool_calls WHERE task_id=? AND name='prepare_chunk'",(tid,)).fetchone()[0]
         assert prepared>0
         assert c.execute('SELECT count(*) FROM evidence WHERE task_id=?',(tid,)).fetchone()[0]==1+prepared
-        assert c.execute('SELECT count(*) FROM tool_calls WHERE task_id=?',(tid,)).fetchone()[0]==5+prepared
+        assert c.execute('SELECT count(*) FROM tool_calls WHERE task_id=? AND name!="context_budget"',(tid,)).fetchone()[0]==5+prepared
         assert result['citations'][0].startswith(tid)
 
 def test_fabricated_citation_rejected_and_errors_bounded(db):

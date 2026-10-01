@@ -100,7 +100,9 @@ def process_one(path,model_client=None):
         message=str(exc) if isinstance(exc,ModelError) else '任务执行失败，请检查服务配置或工具状态'
         with connect(path) as c:
             c.execute("UPDATE tasks SET status='failed',error=?,lease_until=NULL WHERE id=? AND worker_token=? AND status='running'",(message,task['id'],token))
-        import logging;logging.error('Task %s failed (%s)',task['id'],type(exc).__name__)
+        import logging
+        if isinstance(exc,ModelError):logging.error('Task %s failed (%s)',task['id'],type(exc).__name__)
+        else:logging.exception('Task %s failed unexpectedly',task['id'])
     return True
 
 def execute(task):
