@@ -14,10 +14,12 @@ def now():return datetime.now(timezone.utc).isoformat()
 SCENARIOS={'unreleased','unverified','verified','conflict','stale'}
 KINDS={'complaint','operations','requirements','coding'}
 
-def create_task(path,kind,scenario,prompt,mode="demo"):
+def create_task(path,kind,scenario,prompt,mode="demo",document_ids=None):
     tid='task-'+uuid.uuid4().hex[:12]
     with connect(path) as c:
-        c.execute('INSERT INTO tasks(id,kind,scenario,prompt,status,created_at,mode) VALUES(?,?,?,?,?,?,?)',(tid,kind,scenario,prompt,'queued',now(),mode))
+        from .retrieval import validate_selection
+        validate_selection(c,document_ids or [])
+        c.execute('INSERT INTO tasks(id,kind,scenario,prompt,status,created_at,mode,document_ids) VALUES(?,?,?,?,?,?,?,?)',(tid,kind,scenario,prompt,'queued',now(),mode,json.dumps(document_ids or [])))
     return tid
 
 def coding_fixture():

@@ -31,7 +31,8 @@ async def lifespan(app):
 app=FastAPI(title='Ontology Workbench API',version='0.3.0',lifespan=lifespan)
 class TaskInput(BaseModel):
     mode:Literal['demo','model']='demo'
-    kind:Literal['complaint','operations','requirements','coding']
+    kind:Literal['knowledge','complaint','operations','requirements','coding']
+    document_ids:list[str]=Field(default_factory=list,max_length=20)
     scenario:Literal['unreleased','unverified','verified','conflict','stale']='unverified'
     prompt:str=Field(default='客户已经付款，订单仍显示未支付。请排查。',min_length=1,max_length=2000)
 
@@ -43,7 +44,7 @@ def health():
     return {'status':'ok','mode':'demo-and-optional-model','database':'sqlite','model_connected':False,'model_configured':configured,'business_connectors':'simulated'}
 @app.get('/api/documents')
 def documents(q:str=Query('',max_length=100),include_inactive:bool=False):
-    with connect(DB) as c:return [dict(r) for r in c.execute('SELECT d.id,d.project,r.title,r.body,r.version,h.status,h.revision,h.published_revision,h.generation FROM documents d JOIN document_heads h ON h.document_id=d.id JOIN document_revisions r ON r.document_id=d.id AND r.revision=h.revision WHERE d.project=? AND (? OR h.status="active") AND (instr(r.title,?)>0 OR instr(r.body,?)>0) ORDER BY d.id',(PROJECT,include_inactive,q,q))]
+    with connect(DB) as c:return [dict(r) for r in c.execute('SELECT d.id,d.project,r.title,r.body,r.version,h.status,h.revision,h.published_revision,h.generation,(SELECT count(*) FROM document_chunks ch WHERE ch.document_id=d.id AND ch.revision=h.published_revision) indexed_chunks FROM documents d JOIN document_heads h ON h.document_id=d.id JOIN document_revisions r ON r.document_id=d.id AND r.revision=h.revision WHERE d.project=? AND (? OR h.status="active") AND (instr(r.title,?)>0 OR instr(r.body,?)>0) ORDER BY d.id',(PROJECT,include_inactive,q,q))]
 @app.get('/api/ontology')
 def ontology():
     with connect(DB) as c:
@@ -61,11 +62,15 @@ def paths(start:str,end:str,depth:int=Query(6,ge=1,le=6)):
     except KeyError:raise HTTPException(404,'对象不存在或不可访问')
 @app.post('/api/tasks',status_code=202)
 def tasks_create(body:TaskInput):
+    if body.kind=='knowledge' and body.mode!='model':raise HTTPException(422,'资料问答需要模型辅助模式')
+    if body.document_ids and body.mode!='model':raise HTTPException(422,'指定资料仅用于模型辅助模式')
     if body.mode=='model':
         from .model import ModelSettings,ModelError
         try:ModelSettings.from_env()
         except ModelError as e:raise HTTPException(503,str(e))
-    return {'id':create_task(DB,body.kind,body.scenario,body.prompt,body.mode),'status':'queued'}
+    try:tid=create_task(DB,body.kind,body.scenario,body.prompt,body.mode,body.document_ids)
+    except ValueError as e:raise HTTPException(422,str(e))
+    return {'id':tid,'status':'queued'}
 @app.get('/api/tasks')
 def tasks_list():
     with connect(DB) as c:return [dict(r) for r in c.execute('SELECT id,kind,mode,status,created_at FROM tasks ORDER BY created_at DESC LIMIT 30')]
@@ -75,6 +80,7 @@ def task_get(task_id:str):
         r=c.execute('SELECT * FROM tasks WHERE id=?',(task_id,)).fetchone()
         if not r:raise HTTPException(404,'任务不存在')
         t=dict(r);t['result']=json.loads(t['result']) if t['result'] else None
+        t['document_ids']=json.loads(t['document_ids'])
         t['evidence']=[dict(e)|{'payload':json.loads(e['payload'])} for e in c.execute('SELECT * FROM evidence WHERE task_id=? AND attempt=?',(task_id,t['attempts']))]
         from .knowledge import task_warnings
         t['knowledge_warnings']=task_warnings(c,task_id,t['attempts'])
@@ -95,6 +101,21 @@ def document_create(body:DocumentInput):
         from .knowledge import register_document
         register_document(c,doc_id)
     return {'id':doc_id,'project':PROJECT,'status':'demo-imported'}
+
+@app.get('/api/search')
+def search_api(q:str=Query(min_length=1,max_length=2000),document_id:list[str]=Query(default=[]),limit:int=Query(8,ge=1,le=20)):
+    from .retrieval import search,validate_selection
+    with connect(DB) as c:
+        try:validate_selection(c,document_id)
+        except ValueError as e:raise HTTPException(422,str(e))
+        return search(c,q,document_id,limit)
+
+@app.get('/api/chunks/{chunk_id}')
+def chunk_api(chunk_id:str):
+    from .retrieval import read_chunk
+    with connect(DB) as c:
+        try:return read_chunk(c,chunk_id,require_active=False)
+        except ValueError:raise HTTPException(404,'片段不存在或不可访问')
 
 class RelationInput(BaseModel):
     source:str

@@ -182,7 +182,7 @@ def test_next_model_call_stops_after_source_is_withdrawn(db):
 
 def test_v2_database_upgrade_preserves_imports_and_does_not_invent_task_refs(db):
     with connect(db) as c:
-        for name in ['maintenance_events','task_knowledge_refs','relation_sources','document_heads','document_revisions']:
+        for name in ['chunk_terms','document_chunks','maintenance_events','task_knowledge_refs','relation_sources','document_heads','document_revisions']:
             c.execute('DROP TABLE '+name)
         c.execute("UPDATE meta SET value='2' WHERE key='schema_version'")
         c.execute("INSERT INTO documents VALUES('old-import','旧导入','7','保留原文','payments')")

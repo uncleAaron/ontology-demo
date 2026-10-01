@@ -26,7 +26,7 @@
 | `agent.py` | 模型循环、工具响应关联、证据引用校验、停止条件、草稿交付 |
 | `engine.py` | 数据库任务领取、租约续期、持有者校验、逐调用持久化与恢复 |
 
-模型工具：`search_documents`、`read_document`、`get_object`、`get_relations`、`inspect_runtime`、`inspect_code_example`（仅编码任务）、`submit_answer`。
+模型工具：`search_documents`（中文分段检索）、`read_document`、`read_chunk`、`read_document_range`、`get_object`、`get_relations`、`inspect_runtime`、`inspect_code_example`（仅编码任务）、`submit_answer`。
 
 没有任意 URL、SQL、文件路径、shell 或发布工具。`inspect_runtime` 仍是模拟业务连接器；`inspect_code_example` 只执行可信内置样例，不执行模型生成的代码。
 
@@ -51,3 +51,10 @@
 工具调用消息结构参考 [Function calling](https://platform.openai.com/docs/guides/function-calling)。当前使用 Chat Completions 兼容协议，不承诺适配所有供应商或仅支持其他协议的模型；需要对实际服务验证工具 schema 和参数兼容性。
 
 下一步接入真实业务系统、企业身份与审批；完善语义支持评测和模型输出审查；实现安全代码执行器与受控写动作。更换模型不应修改文档、语义数据和证据接口。
+
+
+## 资料使用阶段
+
+任务可选择 `kind=knowledge`（仅支持 model）与 `document_ids`（最多20篇有效资料）。所有模型任务在首轮前自动检索并登记原文片段，选择范围限制文档检索/读取。knowledge 任务仅暴露资料工具与提交工具，未找到有效匹配且未选文档时直接返回证据不足。初始取证为服务端步骤，独立记录，不消耗12次模型工具额度；仍有最多8片段的固定上限。
+
+服务端范围仍是固定 payments 演示项目，不表示所有用户已授权。历史原文片段接口是本地维护视图，不允许据此绕过失效保护用于Agent。当前尚未实现预算收尾、候选加工或语义检索。

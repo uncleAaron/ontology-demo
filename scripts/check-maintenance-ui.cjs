@@ -32,7 +32,7 @@ const submit=(form,button)=>form.dispatchEvent(new w.SubmitEvent('submit',{bubbl
  f=get('#review-form');f.elements.namedItem('reason').value='核对来源';submit(f,f.querySelector('[value="approve"]'));
  await until(()=>get('.relation-review'));
  f=get('.relation-review');f.elements.namedItem('reason').value='核实关系仍然成立';submit(f,f.querySelector('button'));
- await until(()=>!get('.relation-review[data-relation="e3"]'));
+ await until(()=>get('#review-form')&&!get('.relation-review[data-relation="e3"]'));
  f=get('#review-form');f.elements.namedItem('reason').value='撤回演练';submit(f,f.querySelector('[value="withdraw"]'));
  await until(()=>get('#doc-reader .warning')?.textContent.includes('已撤回'));
  assert.equal(get('#revision-form'),null);

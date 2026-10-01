@@ -35,7 +35,9 @@ def migrate(c):
     c.execute("INSERT OR IGNORE INTO document_revisions SELECT id,1,title,body,version,'既有演示资料迁移',? FROM documents",(now(),))
     c.execute("INSERT OR IGNORE INTO document_heads SELECT id,1,1,1,'active' FROM documents")
     c.execute('INSERT OR IGNORE INTO relation_sources SELECT id,document_id,1,1 FROM relations WHERE document_id IS NOT NULL')
-    c.execute("INSERT OR REPLACE INTO meta VALUES('schema_version','3')")
+    c.execute("INSERT OR REPLACE INTO meta VALUES('schema_version','4')")
+    from .retrieval import migrate as migrate_chunks
+    migrate_chunks(c)
 
 def event(c,doc_id,action,revision,reason,details=None):
     c.execute('INSERT INTO maintenance_events(document_id,action,revision,reason,actor,details,created_at) VALUES(?,?,?,?,?,?,?)',
@@ -46,6 +48,8 @@ def register_document(c,doc_id):
     c.execute('INSERT INTO document_revisions VALUES(?,?,?,?,?,?,?)',(doc_id,1,d['title'],d['body'],d['version'],'演示导入',now()))
     c.execute("INSERT INTO document_heads VALUES(?,1,1,1,'active')",(doc_id,))
     event(c,doc_id,'import',1,'演示身份直接导入，不代表企业审核')
+    from .retrieval import index_revision
+    index_revision(c,doc_id,1)
 
 def head(c,doc_id):
     h=c.execute('SELECT h.* FROM document_heads h JOIN documents d ON d.id=h.document_id WHERE d.id=? AND d.project=?',(doc_id,PROJECT)).fetchone()
@@ -72,6 +76,8 @@ def review(c,doc_id,data):
         r=c.execute('SELECT * FROM document_revisions WHERE document_id=? AND revision=?',(doc_id,h['revision'])).fetchone()
         c.execute('UPDATE documents SET title=?,body=?,version=? WHERE id=?',(r['title'],r['body'],r['version'],doc_id))
         c.execute("UPDATE document_heads SET published_revision=revision,status='active',generation=generation+1 WHERE document_id=?",(doc_id,))
+        from .retrieval import index_revision
+        index_revision(c,doc_id,h['revision'])
     else:c.execute("UPDATE document_heads SET status='rejected',generation=generation+1 WHERE document_id=?",(doc_id,))
     event(c,doc_id,data['decision'],h['revision'],data['reason'])
     return head(c,doc_id)

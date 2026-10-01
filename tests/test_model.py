@@ -82,7 +82,7 @@ def test_five_tools_in_one_round_are_executed(db):
             message['tool_calls']=[call('search_documents',{'query':'支付'},f'c{i}')['tool_calls'][0] for i in range(5)]
         return httpx.Response(200,json={'choices':[{'message':message}]})
     result,evidence=run_agent(db,{'id':'t','kind':'complaint','prompt':'排查'},ModelClient(settings(),httpx.MockTransport(handler)))
-    assert len(evidence)==5 and len(result['citations'])==5
+    assert len([e for e in evidence if e['label']=='search_documents'])==5 and len(result['citations'])==5
 
 def test_over_remaining_budget_executes_none_of_batch(db):
     first=call('search_documents',{'query':'支付'})
@@ -90,7 +90,7 @@ def test_over_remaining_budget_executes_none_of_batch(db):
     second['tool_calls'].append(call('search_documents',{'query':'支付'},'c3')['tool_calls'][0])
     client=ScriptedClient([first,second]);client.settings=replace(settings(),max_calls=2)
     result,evidence=run_agent(db,{'id':'t','kind':'complaint','prompt':'排查'},client)
-    assert result['partial'] and len(evidence)==1
+    assert result['partial'] and len([e for e in evidence if e['label']=='search_documents'])==1
     assert '剩余额度' in result['artifacts'][0]['text']
 
 def test_timeout_and_context_budget():
@@ -149,8 +149,10 @@ def test_agent_runtime_gate_and_citations(db,scenario,expected):
         result=json.loads(t['result'])
         assert t['status']=='completed' and result['decision']==expected
         assert result['mode']=='model-assisted-simulation'
-        assert c.execute('SELECT count(*) FROM evidence WHERE task_id=?',(tid,)).fetchone()[0]==1
-        assert c.execute('SELECT count(*) FROM tool_calls WHERE task_id=?',(tid,)).fetchone()[0]==4
+        prepared=c.execute("SELECT count(*) FROM tool_calls WHERE task_id=? AND name='prepare_chunk'",(tid,)).fetchone()[0]
+        assert prepared>0
+        assert c.execute('SELECT count(*) FROM evidence WHERE task_id=?',(tid,)).fetchone()[0]==1+prepared
+        assert c.execute('SELECT count(*) FROM tool_calls WHERE task_id=?',(tid,)).fetchone()[0]==5+prepared
         assert result['citations'][0].startswith(tid)
 
 def test_fabricated_citation_rejected_and_errors_bounded(db):
@@ -190,4 +192,4 @@ def test_schema_upgrade_preserves_old_tasks(tmp_path):
     init(p);init(p)
     with connect(p) as c:
         assert c.execute("SELECT mode FROM tasks WHERE id='old'").fetchone()[0]=='demo'
-        assert c.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0]=='3'
+        assert c.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0]=='4'

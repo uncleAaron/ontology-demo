@@ -29,7 +29,7 @@ def init(path):
     with connect(path) as c:
         c.execute('PRAGMA journal_mode=WAL')
         c.executescript(SCHEMA)
-        for table,column,definition in [('tasks','mode',"TEXT NOT NULL DEFAULT 'demo'"),('tasks','worker_token','TEXT'),('evidence','attempt','INTEGER NOT NULL DEFAULT 1'),('steps','attempt','INTEGER NOT NULL DEFAULT 1')]:
+        for table,column,definition in [('tasks','document_ids',"TEXT NOT NULL DEFAULT '[]'"),('tasks','mode',"TEXT NOT NULL DEFAULT 'demo'"),('tasks','worker_token','TEXT'),('evidence','attempt','INTEGER NOT NULL DEFAULT 1'),('steps','attempt','INTEGER NOT NULL DEFAULT 1')]:
             if column not in {r['name'] for r in c.execute('PRAGMA table_info('+table+')')}:
                 c.execute('ALTER TABLE '+table+' ADD COLUMN '+column+' '+definition)
         c.execute("INSERT OR REPLACE INTO meta VALUES('schema_version','2')")
