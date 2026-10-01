@@ -15,6 +15,21 @@ make setup
 make run
 ```
 
+`make setup` 会检查当前 Python 和已有 `.venv` 都满足 3.12+，并升级虚拟环境内的 pip。可使用 `make setup PYTHON="$(pyenv which python)"` 显式选择 pyenv 当前解释器。已有 `.venv` 不会因为系统 Python 升级而自动切换版本。
+
+若遇到依赖版本找不到或 `.venv` 仍使用旧 Python，在项目目录执行：
+
+```bash
+git pull --ff-only
+python3 --version
+# 仅在 .venv 存在时备份；保留 data/ 中的数据库。
+mv .venv ".venv.backup-$(date +%Y%m%d-%H%M%S)"
+make setup PYTHON="$(pyenv which python)"
+make run
+```
+
+pip 可以通过 `python3 -m pip config list` 核对配置的安装源；切勿在公开日志中粘贴含凭据的源地址。安装失败时先确认解释器和源中可用版本，不单独修改一个传递依赖版本来绕过锁文件。
+
 打开 http://127.0.0.1:8000 ，API 文档位于 http://127.0.0.1:8000/docs 。
 
 不使用 Make 时：
@@ -96,7 +111,7 @@ make build
 
 构建检查 Python 编译与 JavaScript 语法，生成 `dist/ontology-demo.tar.gz` 源码分发包。前端为静态资源，无前端打包依赖。仓库不提交虚拟环境、数据库、密钥或生成的归档。
 
-`requirements.lock` 固定本次验证环境依赖（含测试工具），便于复现；`requirements.txt` 和 `requirements-dev.txt` 描述直接依赖范围。运行部署前应由项目维护者审核并定期更新锁定版本。
+`requirements.lock` 固定从官方 PyPI 全新安装并验证的依赖（含测试工具），便于复现；`requirements.txt` 和 `requirements-dev.txt` 描述直接依赖范围。运行部署前应由项目维护者审核并定期更新锁定版本。
 
 ## 本次验证记录
 
