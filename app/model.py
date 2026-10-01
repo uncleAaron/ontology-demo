@@ -18,7 +18,7 @@ class ModelSettings:
     max_rounds:int=6
     max_calls:int=12
     max_context_chars:int=48000
-    max_output_tokens:int=1200
+    max_output_tokens:int=4096
 
     @classmethod
     def from_env(cls):
@@ -33,7 +33,11 @@ class ModelSettings:
             raise ModelError('模型地址必须使用 HTTPS；本机测试允许 HTTP')
         if not parsed.hostname or not parsed.path.endswith('/chat/completions'):
             raise ModelError('请配置完整的 Chat Completions 接口地址')
-        return cls(endpoint,model,key)
+        try:output_tokens=int(os.getenv('ONTOLOGY_MODEL_MAX_OUTPUT_TOKENS','4096'))
+        except ValueError:raise ModelError('ONTOLOGY_MODEL_MAX_OUTPUT_TOKENS 必须是 256 到 32768 之间的整数') from None
+        if not 256<=output_tokens<=32768:
+            raise ModelError('ONTOLOGY_MODEL_MAX_OUTPUT_TOKENS 必须是 256 到 32768 之间的整数')
+        return cls(endpoint,model,key,max_output_tokens=output_tokens)
 
 class ModelClient:
     def __init__(self,settings,transport=None):

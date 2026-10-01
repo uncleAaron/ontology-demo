@@ -34,6 +34,7 @@ def test_transport_contract_and_secret_redaction():
         body=json.loads(req.content)
         assert req.headers['Authorization']=='Bearer secret-test-key'
         assert body['model']=='test-model' and body['parallel_tool_calls'] is False
+        assert body['max_tokens']==4096
         return httpx.Response(200,json={'choices':[{'message':call('inspect_runtime',{})}]})
     c=ModelClient(settings(),httpx.MockTransport(handler))
     assert c.complete([{'role':'user','content':'test'}],[])['tool_calls'][0]['function']['name']=='inspect_runtime'
@@ -108,6 +109,28 @@ def test_config_rejects_unsafe_and_missing(monkeypatch):
     with pytest.raises(ModelError):ModelSettings.from_env()
     monkeypatch.setenv('ONTOLOGY_MODEL_URL','http://127.0.0.1:9999/v1/chat/completions')
     assert ModelSettings.from_env().model=='test'
+
+@pytest.mark.parametrize('value,expected',[(None,4096),('8192',8192),('256',256),('32768',32768)])
+def test_output_budget_configuration(monkeypatch,value,expected):
+    monkeypatch.setenv('ONTOLOGY_MODEL_URL','https://models.example.test/chat/completions')
+    monkeypatch.setenv('ONTOLOGY_MODEL_NAME','test')
+    monkeypatch.setenv('ONTOLOGY_MODEL_KEY','secret')
+    if value is None:monkeypatch.delenv('ONTOLOGY_MODEL_MAX_OUTPUT_TOKENS',raising=False)
+    else:monkeypatch.setenv('ONTOLOGY_MODEL_MAX_OUTPUT_TOKENS',value)
+    settings=ModelSettings.from_env()
+    assert settings.max_output_tokens==expected
+    def handler(req):
+        assert json.loads(req.content)['max_tokens']==expected
+        return httpx.Response(200,json={'choices':[{'message':call('inspect_runtime',{})}]})
+    ModelClient(settings,httpx.MockTransport(handler)).complete([],[])
+
+@pytest.mark.parametrize('value',['','bad','1.5','255','32769'])
+def test_invalid_output_budget_is_rejected(monkeypatch,value):
+    monkeypatch.setenv('ONTOLOGY_MODEL_URL','https://models.example.test/chat/completions')
+    monkeypatch.setenv('ONTOLOGY_MODEL_NAME','test')
+    monkeypatch.setenv('ONTOLOGY_MODEL_KEY','secret')
+    monkeypatch.setenv('ONTOLOGY_MODEL_MAX_OUTPUT_TOKENS',value)
+    with pytest.raises(ModelError,match='MAX_OUTPUT_TOKENS'):ModelSettings.from_env()
 
 def test_registry_rejects_unknown_extra_and_private(db):
     task={'kind':'complaint','scenario':'verified'}
